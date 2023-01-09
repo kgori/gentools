@@ -30,6 +30,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// It takes a `rust_htslib::bam::Record` and returns a `Result<String, Box<dyn std::error::Error>>`
+///
+/// Arguments:
+///
+/// * `record`: a rust_htslib::bam::Record object
+///
+/// Returns:
+///
+/// A string containing the fastq record.
 fn record_to_fastq_string(
     record: &rust_htslib::bam::Record,
 ) -> Result<String, Box<dyn std::error::Error>> {
@@ -49,6 +58,34 @@ fn record_to_fastq_string(
     ));
 }
 
+#[test]
+fn test_record_to_fastq_string() {
+    let mut record = rust_htslib::bam::Record::new();
+    record.set(b"test", None, b"ACGT", &[33, 34, 35, 36]);
+    record.set_first_in_template();
+    assert_eq!(
+        record_to_fastq_string(&record).unwrap(),
+        "@test/1".to_string() + "\n" + "ACGT" + "\n" + "+" + "\n" + "BCDE"
+    );
+    record.unset_first_in_template();
+    record.set_last_in_template();
+    assert_eq!(
+        record_to_fastq_string(&record).unwrap(),
+        "@test/2".to_string() + "\n" + "ACGT" + "\n" + "+" + "\n" + "BCDE"
+    );
+}
+
+/// It reads a BAM file, and writes out three FASTQ files, one for reads that are unmapped, one for
+/// reads that are mapped but have an unmapped mate, and one for reads that are unmapped but have a
+/// mapped mate
+///
+/// Arguments:
+///
+/// * `opts`: Cli
+///
+/// Returns:
+///
+/// A Result<(), Box<dyn std::error::Error>>
 fn using_htslib(opts: Cli) -> Result<(), Box<dyn std::error::Error>> {
     use rust_htslib::{bam, bam::Read};
     let mut bam = bam::Reader::from_path(opts.bamfile)?;
@@ -71,18 +108,27 @@ fn using_htslib(opts: Cli) -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
 
-        if !(record.is_unmapped() || record.is_mate_unmapped()) {
-            continue;
-        }
-
-        let fastq_string = record_to_fastq_string(&record)?;
-
-        if record.is_unmapped() && record.is_mate_unmapped() {
-            writeln!(&mut unmapped_file, "{}", fastq_string)?;
-        } else if record.is_mate_unmapped() && !record.is_unmapped() {
-            writeln!(&mut mapped_with_unmapped_mate_file, "{}", fastq_string)?;
-        } else if record.is_unmapped() && !record.is_mate_unmapped() {
-            writeln!(&mut unmapped_with_mapped_mate_file, "{}", fastq_string)?;
+        match (record.is_unmapped(), record.is_mate_unmapped()) {
+            (true, true) => {
+                writeln!(&mut unmapped_file, "{}", record_to_fastq_string(&record)?)?;
+            }
+            (false, true) => {
+                writeln!(
+                    &mut mapped_with_unmapped_mate_file,
+                    "{}",
+                    record_to_fastq_string(&record)?
+                )?;
+            }
+            (true, false) => {
+                writeln!(
+                    &mut unmapped_with_mapped_mate_file,
+                    "{}",
+                    record_to_fastq_string(&record)?
+                )?;
+            }
+            _ => {
+                continue;
+            }
         }
     }
     Ok(())
