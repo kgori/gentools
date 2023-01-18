@@ -1,135 +1,208 @@
-use std::fs::File;
-use std::io::Write;
+extern crate bio;
+extern crate bwa;
+
+use bwa::BwaAligner;
 use std::str::from_utf8;
 
+use bio::io::fastq;
 use clap::Parser;
 use num_cpus;
+use rust_htslib::{bam, bam::Read};
 
 #[derive(Parser)]
 struct Cli {
     #[arg(short, long, value_name = "FILE")]
     bamfile: std::path::PathBuf,
 
-    #[arg(short = 'u', long, value_name = "FILE")]
-    unmapped: std::path::PathBuf,
+    #[clap(
+        short,
+        long,
+        value_name = "FILES",
+        value_delimiter = ',',
+        help = "Reference files to filter reads against"
+    )]
+    references: Option<Vec<std::path::PathBuf>>,
 
-    #[arg(short = 'm', long, value_name = "FILE")]
-    mate_mapped: std::path::PathBuf,
+    #[clap(
+        short = 'o',
+        long,
+        value_name = "FILE",
+        help = "Name of output fastq file"
+    )]
+    outfile: std::path::PathBuf,
 
-    #[arg(short = 'a', long, value_name = "FILE")]
-    mate_unmapped: std::path::PathBuf,
+    #[clap(
+        short,
+        long,
+        default_value_t = 10.0,
+        help = "Filter out reads with average base quality smaller than this"
+    )]
+    min_quality: f32,
 
-    #[arg(short = 't', long, value_name = "INT", default_value_t = 0)]
-    extra_threads: usize,
+    #[clap(
+        short = 's',
+        long,
+        default_value_t = 5000,
+        help = "BWA alignment batch size"
+    )]
+    batch_size: usize,
+
+    #[clap(
+        short = 't',
+        long,
+        value_name = "INT",
+        default_value_t = 1,
+        help = "Number of reader threads"
+    )]
+    reader_threads: usize,
+
+    #[clap(
+        short,
+        long,
+        value_name = "INT",
+        default_value_t = 1,
+        help = "Number of aligner threads"
+    )]
+    aligner_threads: usize,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let opts = Cli::parse();
 
-    using_htslib(opts)?;
+    do_work(opts)?;
     Ok(())
 }
 
-/// It takes a `rust_htslib::bam::Record` and returns a `Result<String, Box<dyn std::error::Error>>`
-///
-/// Arguments:
-///
-/// * `record`: a rust_htslib::bam::Record object
-///
-/// Returns:
-///
-/// A string containing the fastq record.
-fn record_to_fastq_string(
+fn bam_to_fastq(
     record: &rust_htslib::bam::Record,
-) -> Result<String, Box<dyn std::error::Error>> {
-    let mut name = from_utf8(&record.qname())?.to_string();
+) -> Result<fastq::Record, Box<dyn std::error::Error>> {
+    let name = from_utf8(&record.qname())?;
+    let seq = record.seq().as_bytes();
     let qual = record.qual().iter().map(|q| q + 33).collect::<Vec<u8>>();
-    let qual_str = from_utf8(&qual)?;
-    if record.is_first_in_template() {
-        name += "/1";
-    } else if record.is_last_in_template() {
-        name += "/2";
-    }
-    return Ok(format!(
-        "@{}\n{}\n+\n{}",
-        name,
-        from_utf8(&record.seq().as_bytes())?,
-        qual_str
-    ));
+    Ok(fastq::Record::with_attrs(name, None, &seq, &qual))
+}
+
+fn avg_quality(record: &rust_htslib::bam::Record) -> f32 {
+    record.qual().iter().map(|x| *x as f32).sum::<f32>() / record.qual().len() as f32
 }
 
 #[test]
-fn test_record_to_fastq_string() {
-    let mut record = rust_htslib::bam::Record::new();
-    record.set(b"test", None, b"ACGT", &[33, 34, 35, 36]);
-    record.set_first_in_template();
-    assert_eq!(
-        record_to_fastq_string(&record).unwrap(),
-        "@test/1".to_string() + "\n" + "ACGT" + "\n" + "+" + "\n" + "BCDE"
-    );
-    record.unset_first_in_template();
-    record.set_last_in_template();
-    assert_eq!(
-        record_to_fastq_string(&record).unwrap(),
-        "@test/2".to_string() + "\n" + "ACGT" + "\n" + "+" + "\n" + "BCDE"
-    );
+fn test_bam_to_fastq() {
+    let mut bam_rec = rust_htslib::bam::Record::new();
+    bam_rec.set(b"test", None, b"ACGT", &[0, 0, 0, 41]);
+
+    let fastq_rec = fastq::Record::with_attrs("test", None, b"ACGT", b"!!!J");
+
+    assert_eq!(bam_to_fastq(&bam_rec).unwrap(), fastq_rec,);
 }
 
-/// It reads a BAM file, and writes out three FASTQ files, one for reads that are unmapped, one for
-/// reads that are mapped but have an unmapped mate, and one for reads that are unmapped but have a
-/// mapped mate
-///
-/// Arguments:
-///
-/// * `opts`: Cli
-///
-/// Returns:
-///
-/// A Result<(), Box<dyn std::error::Error>>
-fn using_htslib(opts: Cli) -> Result<(), Box<dyn std::error::Error>> {
-    use rust_htslib::{bam, bam::Read};
+#[test]
+fn test_avg_quality() {
+    let mut bam_rec = rust_htslib::bam::Record::new();
+    bam_rec.set(b"test", None, b"ACGT", &[10, 12, 15, 45]);
+    assert_eq!(avg_quality(&bam_rec), 20.5);
+}
+
+fn do_work(opts: Cli) -> Result<(), Box<dyn std::error::Error>> {
+    println!("Opening bam");
     let mut bam = bam::Reader::from_path(opts.bamfile)?;
-    if opts.extra_threads > 0 {
-        let mut extra_threads = opts.extra_threads;
+
+    let aligners = if let Some(references) = opts.references {
+        println!("Opening BWA alignment reference files");
+        references
+            .iter()
+            .map(|r| BwaAligner::from_path(r).unwrap())
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+
+    if opts.reader_threads > 1 {
+        let mut extra_threads = opts.reader_threads - 1;
         if extra_threads > num_cpus::get() - 1 {
             extra_threads = num_cpus::get() - 1;
         }
-        println!("Using {} extra threads", extra_threads);
+        println!("Using {} threads for reading", extra_threads + 1);
         bam.set_threads(extra_threads)?;
+    } else {
+        println!("Using 1 thread for reading");
     }
 
-    let mut unmapped_file = File::create(opts.unmapped)?;
-    let mut mapped_with_unmapped_mate_file = File::create(opts.mate_unmapped)?;
-    let mut unmapped_with_mapped_mate_file = File::create(opts.mate_mapped)?;
+    let mut aligner_threads = opts.aligner_threads;
+    if aligner_threads > num_cpus::get() {
+        aligner_threads = num_cpus::get();
+    }
+    if aligner_threads < 1 {
+        aligner_threads = 1;
+    }
+    if aligner_threads == 1 {
+        println!("Using 1 thread for alignment");
+    } else {
+        println!("Using {} threads for alignment", aligner_threads);
+    }
 
+    println!("Opening output file");
+    let mut unmapped_file = fastq::Writer::to_file(opts.outfile)?;
+
+    let mut unmapped_reads: Vec<fastq::Record> = Vec::new();
+    println!("Looking for unmapped reads");
     for r in bam.records() {
         let record = r?;
         if record.is_secondary() || record.is_duplicate() || record.is_supplementary() {
             continue;
         }
 
-        match (record.is_unmapped(), record.is_mate_unmapped()) {
-            (true, true) => {
-                writeln!(&mut unmapped_file, "{}", record_to_fastq_string(&record)?)?;
-            }
-            (false, true) => {
-                writeln!(
-                    &mut mapped_with_unmapped_mate_file,
-                    "{}",
-                    record_to_fastq_string(&record)?
-                )?;
-            }
-            (true, false) => {
-                writeln!(
-                    &mut unmapped_with_mapped_mate_file,
-                    "{}",
-                    record_to_fastq_string(&record)?
-                )?;
-            }
-            _ => {
-                continue;
+        if record.is_unmapped() {
+            if avg_quality(&record) >= opts.min_quality {
+                unmapped_reads.push(bam_to_fastq(&record)?);
             }
         }
+
+        if unmapped_reads.len() == opts.batch_size {
+            println!("{} unmapped reads collected", unmapped_reads.len());
+            let mut mapped = vec![false; unmapped_reads.len()];
+            for aligner in &aligners {
+                let filters =
+                    aligner.get_alignment_status(&unmapped_reads, false, false, aligner_threads)?;
+                mapped
+                    .iter_mut()
+                    .zip(filters)
+                    .for_each(|(a, b)| *a = *a || b);
+            }
+            unmapped_reads
+                .iter()
+                .zip(mapped)
+                .filter(|(_, is_mapped)| !is_mapped)
+                .map(|(read, _)| read)
+                .for_each(|read| {
+                    unmapped_file.write_record(&read).unwrap();
+                });
+            unmapped_file.flush()?;
+            unmapped_reads.clear();
+        }
     }
+
+    if !unmapped_reads.is_empty() {
+        println!("{} unmapped reads collected", unmapped_reads.len());
+        let mut mapped = vec![false; unmapped_reads.len()];
+        for aligner in &aligners {
+            let filters =
+                aligner.get_alignment_status(&unmapped_reads, false, false, aligner_threads)?;
+            mapped
+                .iter_mut()
+                .zip(filters)
+                .for_each(|(a, b)| *a = *a || b);
+        }
+        unmapped_reads
+            .iter()
+            .zip(mapped)
+            .filter(|(_, is_mapped)| !is_mapped)
+            .map(|(read, _)| read)
+            .for_each(|read| {
+                unmapped_file.write_record(&read).unwrap();
+            });
+        unmapped_reads.clear();
+    }
+
     Ok(())
 }
