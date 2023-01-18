@@ -3,7 +3,7 @@ use rust_htslib::bam::{Read, Reader, Record};
 
 #[derive(Parser)]
 struct Cli {
-    #[clap(parse(from_os_str))]
+    #[clap(short, long, value_name = "FILE")]
     bamfile: std::path::PathBuf,
 }
 
@@ -24,6 +24,7 @@ impl Region {
         }
     }
 
+    #[allow(dead_code)]
     fn print(&self) {
         println!("{}\t{}\t{}\t{}", self.tid, self.start, self.end, self.count)
     }
