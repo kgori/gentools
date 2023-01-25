@@ -6,7 +6,6 @@ use std::fs::File;
 use std::str::from_utf8;
 
 use bio::io::fastq;
-use bio::io::fastq::{Record, Writer};
 use clap::Parser;
 use num_cpus;
 use rust_htslib::{bam, bam::Read};
@@ -28,10 +27,10 @@ struct Cli {
     #[clap(
         short = 'o',
         long,
-        value_name = "FILE",
-        help = "Name of output fastq file"
+        value_name = "STRING",
+        help = "Base name of output fastq files"
     )]
-    outfile: std::path::PathBuf,
+    outfile: String,
 
     #[clap(
         short,
@@ -79,14 +78,10 @@ fn bam_to_fastq(
     record: &rust_htslib::bam::Record,
 ) -> Result<fastq::Record, Box<dyn std::error::Error>> {
     let name = from_utf8(&record.qname())?;
-    let desc = if record.is_first_in_template() {
-        "/1"
-    } else {
-        "/2"
-    };
+    let desc = None;
     let seq = record.seq().as_bytes();
     let qual = record.qual().iter().map(|q| q + 33).collect::<Vec<u8>>();
-    Ok(fastq::Record::with_attrs(name, Some(desc), &seq, &qual))
+    Ok(fastq::Record::with_attrs(name, desc, &seq, &qual))
 }
 
 fn avg_quality(record: &rust_htslib::bam::Record) -> f32 {
@@ -148,10 +143,13 @@ fn do_work(opts: Cli) -> Result<(), Box<dyn std::error::Error>> {
         println!("Using {} threads for alignment", aligner_threads);
     }
 
-    println!("Opening output file");
-    let mut unmapped_file = fastq::Writer::to_file(opts.outfile)?;
+    println!("Opening output files");
+    let mut unmapped_file_1 = fastq::Writer::to_file(std::path::PathBuf::from(&opts.outfile).with_extension("1.fq"))?;
+    let mut unmapped_file_2 = fastq::Writer::to_file(std::path::PathBuf::from(opts.outfile).with_extension("2.fq"))?;
 
-    let mut unmapped_reads: Vec<fastq::Record> = Vec::new();
+    let mut unmapped_reads_1: Vec<fastq::Record> = Vec::new();
+    let mut unmapped_reads_2: Vec<fastq::Record> = Vec::new();
+
     println!("Looking for unmapped reads");
     for r in bam.records() {
         let record = r?;
@@ -161,25 +159,49 @@ fn do_work(opts: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
         if record.is_unmapped() {
             if avg_quality(&record) >= opts.min_quality {
-                unmapped_reads.push(bam_to_fastq(&record)?);
+                if record.is_first_in_template() {
+                    unmapped_reads_1.push(bam_to_fastq(&record)?);
+                } else if record.is_last_in_template() {
+                    unmapped_reads_2.push(bam_to_fastq(&record)?);
+                }
             }
         }
 
-        if unmapped_reads.len() == opts.batch_size {
+        if unmapped_reads_1.len() == opts.batch_size {
+            println!("Collected {} first-in-pair unmapped reads", unmapped_reads_1.len());
             filter_and_write_batch(
                 &aligners,
-                &mut unmapped_reads,
-                &mut unmapped_file,
+                &mut unmapped_reads_1,
+                &mut unmapped_file_1,
+                aligner_threads,
+            )?;
+        }
+
+        if unmapped_reads_2.len() == opts.batch_size {
+            println!("Collected {} second-in-pair unmapped reads", unmapped_reads_2.len());
+            filter_and_write_batch(
+                &aligners,
+                &mut unmapped_reads_2,
+                &mut unmapped_file_2,
                 aligner_threads,
             )?;
         }
     }
 
-    if !unmapped_reads.is_empty() {
+    if !unmapped_reads_1.is_empty() {
         filter_and_write_batch(
             &aligners,
-            &mut unmapped_reads,
-            &mut unmapped_file,
+            &mut unmapped_reads_1,
+            &mut unmapped_file_1,
+            aligner_threads,
+        )?;
+    }
+
+    if !unmapped_reads_2.is_empty() {
+        filter_and_write_batch(
+            &aligners,
+            &mut unmapped_reads_2,
+            &mut unmapped_file_2,
             aligner_threads,
         )?;
     }
