@@ -263,5 +263,6 @@ fn filter_and_write_batch(
             unmapped_file.write_record(read).unwrap();
             written += 1;
         });
+    unmapped_reads.clear();
     Ok(written)
 }
