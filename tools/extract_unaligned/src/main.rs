@@ -160,13 +160,11 @@ fn do_work(opts: Cli) -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
 
-        if record.is_unmapped() {
-            if avg_quality(&record) >= opts.min_quality {
-                if record.is_first_in_template() {
-                    unmapped_reads_1.push(bam_to_fastq(&record)?);
-                } else if record.is_last_in_template() {
-                    unmapped_reads_2.push(bam_to_fastq(&record)?);
-                }
+        if record.is_unmapped() && avg_quality(&record) >= opts.min_quality {
+            if record.is_first_in_template() {
+                unmapped_reads_1.push(bam_to_fastq(&record)?);
+            } else if record.is_last_in_template() {
+                unmapped_reads_2.push(bam_to_fastq(&record)?);
             }
         }
 
