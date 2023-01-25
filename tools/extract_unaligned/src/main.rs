@@ -2,9 +2,11 @@ extern crate bio;
 extern crate bwa;
 
 use bwa::BwaAligner;
+use std::fs::File;
 use std::str::from_utf8;
 
 use bio::io::fastq;
+use bio::io::fastq::{Record, Writer};
 use clap::Parser;
 use num_cpus;
 use rust_htslib::{bam, bam::Read};
@@ -164,50 +166,51 @@ fn do_work(opts: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
 
         if unmapped_reads.len() == opts.batch_size {
-            println!("{} unmapped reads collected", unmapped_reads.len());
-            let mut mapped = vec![false; unmapped_reads.len()];
-            for aligner in &aligners {
-                let filters =
-                    aligner.get_alignment_status(&unmapped_reads, false, false, aligner_threads)?;
-                mapped
-                    .iter_mut()
-                    .zip(filters)
-                    .for_each(|(a, b)| *a = *a || b);
-            }
-            unmapped_reads
-                .iter()
-                .zip(mapped)
-                .filter(|(_, is_mapped)| !is_mapped)
-                .map(|(read, _)| read)
-                .for_each(|read| {
-                    unmapped_file.write_record(&read).unwrap();
-                });
-            unmapped_file.flush()?;
-            unmapped_reads.clear();
+            filter_and_write_batch(
+                &aligners,
+                &mut unmapped_reads,
+                &mut unmapped_file,
+                aligner_threads,
+            )?;
         }
     }
 
     if !unmapped_reads.is_empty() {
-        println!("{} unmapped reads collected", unmapped_reads.len());
-        let mut mapped = vec![false; unmapped_reads.len()];
-        for aligner in &aligners {
-            let filters =
-                aligner.get_alignment_status(&unmapped_reads, false, false, aligner_threads)?;
-            mapped
-                .iter_mut()
-                .zip(filters)
-                .for_each(|(a, b)| *a = *a || b);
-        }
-        unmapped_reads
-            .iter()
-            .zip(mapped)
-            .filter(|(_, is_mapped)| !is_mapped)
-            .map(|(read, _)| read)
-            .for_each(|read| {
-                unmapped_file.write_record(&read).unwrap();
-            });
-        unmapped_reads.clear();
+        filter_and_write_batch(
+            &aligners,
+            &mut unmapped_reads,
+            &mut unmapped_file,
+            aligner_threads,
+        )?;
     }
 
+    Ok(())
+}
+
+fn filter_and_write_batch(
+    aligners: &[BwaAligner],
+    unmapped_reads: &mut Vec<fastq::Record>,
+    unmapped_file: &mut fastq::Writer<File>,
+    aligner_threads: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    println!("{} unmapped reads collected", unmapped_reads.len());
+    let mut mapped = vec![false; unmapped_reads.len()];
+    for aligner in aligners {
+        let filters =
+            aligner.get_alignment_status(&unmapped_reads, false, false, aligner_threads)?;
+        mapped
+            .iter_mut()
+            .zip(filters)
+            .for_each(|(a, b)| *a = *a || b);
+    }
+    unmapped_reads
+        .iter()
+        .zip(mapped)
+        .filter(|(_, is_mapped)| !is_mapped)
+        .map(|(read, _)| read)
+        .for_each(|read| {
+            unmapped_file.write_record(&read).unwrap();
+        });
+    unmapped_reads.clear();
     Ok(())
 }
