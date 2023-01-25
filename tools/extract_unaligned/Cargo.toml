@@ -11,3 +11,4 @@ rust-htslib = "0.40.2"
 bio = "1.1.0"
 num_cpus = "1.15.0"
 bwa = { git = "https://github.com/kgori/rust-bwa.git", branch = "more_options" }
+bio-types = "0.13.0"

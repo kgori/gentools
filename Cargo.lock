@@ -345,6 +345,7 @@ name = "extract_unaligned"
 version = "0.1.0"
 dependencies = [
  "bio",
+ "bio-types",
  "bwa",
  "clap",
  "num_cpus",

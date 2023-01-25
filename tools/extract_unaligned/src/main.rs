@@ -1,4 +1,5 @@
 extern crate bio;
+extern crate bio_types;
 extern crate bwa;
 
 use bwa::BwaAligner;
@@ -6,8 +7,8 @@ use std::fs::File;
 use std::str::from_utf8;
 
 use bio::io::fastq;
+use bio_types::genome::AbstractInterval;
 use clap::Parser;
-use num_cpus;
 use rust_htslib::{bam, bam::Read};
 
 #[derive(Parser)]
@@ -77,7 +78,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn bam_to_fastq(
     record: &rust_htslib::bam::Record,
 ) -> Result<fastq::Record, Box<dyn std::error::Error>> {
-    let name = from_utf8(&record.qname())?;
+    let name = from_utf8(record.qname())?;
     let desc = None;
     let seq = record.seq().as_bytes();
     let qual = record.qual().iter().map(|q| q + 33).collect::<Vec<u8>>();
@@ -144,8 +145,10 @@ fn do_work(opts: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!("Opening output files");
-    let mut unmapped_file_1 = fastq::Writer::to_file(std::path::PathBuf::from(&opts.outfile).with_extension("1.fq"))?;
-    let mut unmapped_file_2 = fastq::Writer::to_file(std::path::PathBuf::from(opts.outfile).with_extension("2.fq"))?;
+    let mut unmapped_file_1 =
+        fastq::Writer::to_file(std::path::PathBuf::from(&opts.outfile).with_extension("1.fq"))?;
+    let mut unmapped_file_2 =
+        fastq::Writer::to_file(std::path::PathBuf::from(opts.outfile).with_extension("2.fq"))?;
 
     let mut unmapped_reads_1: Vec<fastq::Record> = Vec::new();
     let mut unmapped_reads_2: Vec<fastq::Record> = Vec::new();
@@ -168,42 +171,70 @@ fn do_work(opts: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
 
         if unmapped_reads_1.len() == opts.batch_size {
-            println!("Collected {} first-in-pair unmapped reads", unmapped_reads_1.len());
-            filter_and_write_batch(
+            println!(
+                "Current file position: {}\t{}",
+                record.contig(),
+                record.pos()
+            );
+            println!(
+                "Filtering {} first-in-pair unmapped reads",
+                unmapped_reads_1.len()
+            );
+            let written = filter_and_write_batch(
                 &aligners,
                 &mut unmapped_reads_1,
                 &mut unmapped_file_1,
                 aligner_threads,
             )?;
+            println!("Wrote {} reads", written);
         }
 
         if unmapped_reads_2.len() == opts.batch_size {
-            println!("Collected {} second-in-pair unmapped reads", unmapped_reads_2.len());
-            filter_and_write_batch(
+            println!(
+                "Current file position: {}\t{}",
+                record.contig(),
+                record.pos()
+            );
+            println!(
+                "Filtering {} second-in-pair unmapped reads",
+                unmapped_reads_2.len()
+            );
+            let written = filter_and_write_batch(
                 &aligners,
                 &mut unmapped_reads_2,
                 &mut unmapped_file_2,
                 aligner_threads,
             )?;
+            println!("Wrote {} reads", written);
         }
     }
 
     if !unmapped_reads_1.is_empty() {
-        filter_and_write_batch(
+        println!(
+            "Filtering {} first-in-pair unmapped reads",
+            unmapped_reads_1.len()
+        );
+        let written = filter_and_write_batch(
             &aligners,
             &mut unmapped_reads_1,
             &mut unmapped_file_1,
             aligner_threads,
         )?;
+        println!("Wrote {} reads", written);
     }
 
     if !unmapped_reads_2.is_empty() {
-        filter_and_write_batch(
+        println!(
+            "Filtering {} second-in-pair unmapped reads",
+            unmapped_reads_2.len()
+        );
+        let written = filter_and_write_batch(
             &aligners,
             &mut unmapped_reads_2,
             &mut unmapped_file_2,
             aligner_threads,
         )?;
+        println!("Wrote {} reads", written);
     }
 
     Ok(())
@@ -214,12 +245,12 @@ fn filter_and_write_batch(
     unmapped_reads: &mut Vec<fastq::Record>,
     unmapped_file: &mut fastq::Writer<File>,
     aligner_threads: usize,
-) -> Result<(), Box<dyn std::error::Error>> {
-    println!("{} unmapped reads collected", unmapped_reads.len());
+) -> Result<usize, Box<dyn std::error::Error>> {
     let mut mapped = vec![false; unmapped_reads.len()];
+    let mut written: usize = 0;
     for aligner in aligners {
         let filters =
-            aligner.get_alignment_status(&unmapped_reads, false, false, aligner_threads)?;
+            aligner.get_alignment_status(unmapped_reads, false, false, aligner_threads)?;
         mapped
             .iter_mut()
             .zip(filters)
@@ -231,8 +262,8 @@ fn filter_and_write_batch(
         .filter(|(_, is_mapped)| !is_mapped)
         .map(|(read, _)| read)
         .for_each(|read| {
-            unmapped_file.write_record(&read).unwrap();
+            unmapped_file.write_record(read).unwrap();
+            written += 1;
         });
-    unmapped_reads.clear();
-    Ok(())
+    Ok(written)
 }
