@@ -77,9 +77,14 @@ fn bam_to_fastq(
     record: &rust_htslib::bam::Record,
 ) -> Result<fastq::Record, Box<dyn std::error::Error>> {
     let name = from_utf8(&record.qname())?;
+    let desc = if record.is_first_in_template() {
+        "/1"
+    } else {
+        "/2"
+    };
     let seq = record.seq().as_bytes();
     let qual = record.qual().iter().map(|q| q + 33).collect::<Vec<u8>>();
-    Ok(fastq::Record::with_attrs(name, None, &seq, &qual))
+    Ok(fastq::Record::with_attrs(name, Some(desc), &seq, &qual))
 }
 
 fn avg_quality(record: &rust_htslib::bam::Record) -> f32 {
